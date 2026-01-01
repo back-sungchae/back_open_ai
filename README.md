@@ -1,134 +1,81 @@
-## Node.js Observability-ready Server Template
+# back_open_ai
 
-### 이 프로젝트는 Node.js 기반 서버 템플릿으로, 초기부터 로깅·메트릭·모니터링(Observability) 을 고려한 구조를 제공합니다.
+OpenAI 기반 위험 분석을 포함한 간단한 백엔드 템플릿입니다.  
+Express + 이벤트 버스 + 모듈 구조로 구성되어 있으며, Task 생성 시 AI 분석 → 상태 결정 흐름을 제공합니다.
 
-    •	Express 기반 API 서버
-    •	Prometheus 메트릭 수집
-    •	Grafana 시각화
-    •	Loki + Promtail 로그 수집
-    •	Docker Compose 기반 관측 스택 구성
+## 구조
 
 ```
-node_template/
-├── app/
-│   ├── src/
-│   │   ├── core/
-│   │   │   ├── config/
-│   │   │   │   └── env.js
-│   │   │   ├── logger.js
-│   │   │   └── metrics/
-│   │   │       └── metrics.js
-│   │   │
-│   │   ├── middleware/
-│   │   │   ├── request_logger.js
-│   │   │   └── error_handler.js
-│   │   │
-│   │   ├── modules/
-│   │   │   └── health/
-│   │   │       └── health.controller.js
-│   │   │
-│   │   ├── routes/
-│   │   │   └── index.js
-│   │   │
-│   │   ├── app.js
-│   │   └── server.js
-│   │
-│   ├── logs/
-│   │   └── app.log
-│   │
-│   └── package.json
-│
-├── observability/
-│   ├── docker-compose.yml
-│   │
-│   ├── grafana/
-│   │   └── data/
-│   │
-│   ├── prometheus/
-│   │   ├── prometheus.yml
-│   │   └── data/
-│   │
-│   ├── loki/
-│   │   ├── config.yaml
-│   │   └── data/
-│   │
-│   └── promtail/
-│       └── config.yaml
-│
-└── README.md
+src/
+  core/                 공통(core) 유틸
+  middleware/           공통 미들웨어
+  modules/
+    task/               Task 도메인 (model/service/controller/events/state)
+    ai/                 AI 소비자
+  routes/               라우터
+  app.js                Express 앱
+  server.js             서버 엔트리
 ```
 
-### Prometheus
+## 실행
 
-역할
-• 애플리케이션의 메트릭(metrics) 을 주기적으로 수집하는 시계열 데이터베이스
-
-주요 설정
-• prometheus/prometheus.yml
-• scrape_configs에서 Node 서버의 /metrics 엔드포인트 설정
-• 예: http://host.docker.internal:3000/metrics
-
-확인 주소
-• 웹 UI: http://localhost:9090
-• Targets 상태 확인:
-Status → Targets
-
-### Grafana
-
-역할
-• Prometheus / Loki 데이터를 대시보드로 시각화하는 UI 도구
-
-주요 설정
-• 데이터는 grafana/data/에 저장 (컨테이너 재시작 시 유지)
-• Data Source로 Prometheus, Loki 연결
-
-확인 주소
-• 웹 UI: http://localhost:3001
-• 기본 계정:
-• ID: admin
-• PW: admin
-
-### Loki
-
-역할
-• 애플리케이션 로그를 저장·검색하는 로그 전용 스토리지
-
-주요 설정
-• loki/config.yaml
-• 파일 기반 스토리지 사용
-• 로그 데이터는 loki/data/에 저장
-• 직접 로그를 받지 않고 Promtail을 통해서만 수집
-
-확인 주소
-• 헬스 체크: http://localhost:3100/ready
-• (UI는 없음, Grafana에서 조회)
-
-### Promtail
-
-역할
-• 서버에서 생성된 로그 파일을 읽어 Loki로 전송하는 에이전트
-
-주요 설정
-• promtail/config.yaml
-• **path**로 수집할 로그 파일 경로 지정
-• 예: /app/logs/\*.log
-• Loki 서버 주소:
-
-```
-url: http://loki:3100/loki/api/v1/push
+```bash
+npm install
+node src/server.js
 ```
 
-확인 방법
-• Grafana → Explore → Loki
-• 쿼리 예:
+## 환경 변수
+
+`.env`
 
 ```
-{job="node-app"}
+OPENAI_API_KEY=sk-...
+PORT=3000
 ```
 
-### 컨테이너 실행 방법
+## API
 
+Base URL: `http://localhost:3000`
+
+- `GET /health`
+- `GET /metrics`
+
+Task
+- `GET /tasks`
+- `GET /tasks/:id`
+- `POST /tasks`
+- `PATCH /tasks/:id`
+- `PATCH /tasks/:id/status`
+- `DELETE /tasks/:id`
+
+### 예시
+
+```bash
+curl -X POST http://localhost:3000/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"title":"analyze request","input":"possible fraud risk"}'
 ```
-cd observability
-docker compose up -d
-```
+
+## 동작 흐름
+
+1. `POST /tasks` → Task 생성
+2. `task.created` 이벤트 발생
+3. `risk_analyzer.consumer`가 AI 분석 실행
+4. `task.risk_analyzed` 이벤트 발생
+5. `state_decision.consumer`가 risk 점수로 상태 결정
+6. Task 상태가 `success` 또는 `failed`로 변경
+
+## 상태 전이 규칙
+
+- `pending` → `running`
+- `running` → `success` | `failed`
+
+## 이벤트 (Phase 1)
+
+Phase 1에서는 CRUD 중심 이벤트를 사용합니다.
+Phase 2에서 도메인 이벤트(`TaskRequested`, `TaskApproved` 등)로 확장 예정입니다.
+
+## Notes
+
+- OpenAI API 사용을 위해 Billing 활성화가 필요합니다.
+- `OPENAI_API_KEY`가 없으면 AI 분석이 실패합니다.
